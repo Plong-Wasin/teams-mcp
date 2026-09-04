@@ -4,10 +4,13 @@ import { log } from "../utils/logger.js";
 import { handleGraphError } from "../utils/error-handler.js";
 
 const SCOPES = [
+  "User.Read",
+  "User.ReadBasic.All",
   "Team.ReadBasic.All",
   "Channel.ReadBasic.All",
   "ChannelMessage.Read.All",
   "ChannelMessage.Send",
+  "Chat.Read",
   "offline_access",
 ];
 const DEFAULT_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e";
