@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Client } from "@microsoft/microsoft-graph-client";
 import { z } from "zod";
 import { getGraphClient } from "../graph/client.js";
 import { handleGraphError } from "../utils/error-handler.js";
@@ -8,6 +9,52 @@ function escapeHtml(text: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+const CONTENT_DESCRIPTION =
+  "The message body, sent to Teams as HTML (contentType 'html') — this is NOT plain text. " +
+  "Literal \\n newlines will NOT produce a line break; use HTML tags instead: <br> for a line break, " +
+  "<b>/<i> for bold/italic, <ul><li>...</li></ul> or <ol><li>...</li></ol> for lists, <p>...</p> for paragraphs. " +
+  "Plain unformatted text with no tags still works and renders as a single line.";
+
+const MENTIONS_DESCRIPTION =
+  "User principal names or email addresses to @mention at the start of the message (e.g. ['jane@contoso.com']). Each is resolved to a user and rendered as a clickable @mention that notifies them.";
+
+interface HtmlBody {
+  body: { contentType: "html"; content: string };
+  mentions?: Array<{
+    id: number;
+    mentionText: string;
+    mentioned: { user: { id: string; displayName: string; userIdentityType: "aadUser" } };
+  }>;
+}
+
+async function buildHtmlBody(client: Client, content: string, mentions?: string[]): Promise<HtmlBody> {
+  if (!mentions || mentions.length === 0) {
+    return { body: { contentType: "html", content } };
+  }
+
+  const resolvedMentions: HtmlBody["mentions"] = [];
+  const mentionTags: string[] = [];
+
+  for (let i = 0; i < mentions.length; i++) {
+    const user = await client
+      .api(`/users/${encodeURIComponent(mentions[i])}`)
+      .select("id,displayName")
+      .get();
+
+    resolvedMentions.push({
+      id: i,
+      mentionText: user.displayName,
+      mentioned: { user: { id: user.id, displayName: user.displayName, userIdentityType: "aadUser" } },
+    });
+    mentionTags.push(`<at id="${i}">${escapeHtml(user.displayName)}</at>`);
+  }
+
+  return {
+    body: { contentType: "html", content: `${mentionTags.join(" ")} ${content}` },
+    mentions: resolvedMentions,
+  };
 }
 
 export function registerTeamTools(server: McpServer): void {
@@ -130,13 +177,8 @@ export function registerTeamTools(server: McpServer): void {
         teamId: z.string().describe("The Team ID (from list_teams)"),
         channelId: z.string().describe("The Channel ID (from list_channels)"),
         subject: z.string().optional().describe("Optional bold subject/title line shown above the message body. Ignored for 'chat'-layout channels."),
-        content: z.string().describe("The plain-text message body to post"),
-        mentions: z
-          .array(z.string())
-          .optional()
-          .describe(
-            "User principal names or email addresses to @mention at the start of the message (e.g. ['jane@contoso.com']). Each is resolved to a user and rendered as a clickable @mention that notifies them.",
-          ),
+        content: z.string().describe(CONTENT_DESCRIPTION),
+        mentions: z.array(z.string()).optional().describe(MENTIONS_DESCRIPTION),
       },
     },
     async ({ teamId, channelId, subject, content, mentions }) => {
@@ -149,34 +191,9 @@ export function registerTeamTools(server: McpServer): void {
 
         const useSubject = subject && channel.layoutType !== "chat" ? subject : null;
 
-        let payload: Record<string, unknown>;
-
-        if (mentions && mentions.length > 0) {
-          const resolvedMentions = [];
-          const mentionTags: string[] = [];
-
-          for (let i = 0; i < mentions.length; i++) {
-            const user = await client
-              .api(`/users/${encodeURIComponent(mentions[i])}`)
-              .select("id,displayName")
-              .get();
-
-            resolvedMentions.push({
-              id: i,
-              mentionText: user.displayName,
-              mentioned: { user: { id: user.id, displayName: user.displayName, userIdentityType: "aadUser" } },
-            });
-            mentionTags.push(`<at id="${i}">${escapeHtml(user.displayName)}</at>`);
-          }
-
-          payload = {
-            subject: useSubject,
-            body: { contentType: "html", content: `${mentionTags.join(" ")} ${escapeHtml(content)}` },
-            mentions: resolvedMentions,
-          };
-        } else {
-          payload = { subject: useSubject, body: { content } };
-        }
+        const { body, mentions: resolvedMentions } = await buildHtmlBody(client, content, mentions);
+        const payload: Record<string, unknown> = { subject: useSubject, body };
+        if (resolvedMentions) payload.mentions = resolvedMentions;
 
         const message = await client
           .api(`/teams/${teamId}/channels/${channelId}/messages`)
@@ -187,6 +204,56 @@ export function registerTeamTools(server: McpServer): void {
             {
               type: "text",
               text: `✅ Message posted successfully.\n${JSON.stringify({ id: message.id, webUrl: message.webUrl, channelLayoutType: channel.layoutType, subjectApplied: !!useSubject, mentionedCount: mentions?.length ?? 0 }, null, 2)}`,
+            },
+          ],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: handleGraphError(error) }] };
+      }
+    },
+  );
+
+  // ── edit_channel_message ─────────────────────────────────────────────────
+  server.registerTool(
+    "edit_channel_message",
+    {
+      description:
+        "Edit the body of an existing top-level Channel Message that the authenticated user sent. Replaces the entire message content — there is no partial/append edit. Teams shows an 'Edited' label on the message. The existing subject line is preserved automatically unless you pass a new one (Microsoft Graph clears the subject on any PATCH that omits it, so this tool fetches and re-sends it for you).",
+      inputSchema: {
+        teamId: z.string().describe("The Team ID (from list_teams)"),
+        channelId: z.string().describe("The Channel ID (from list_channels)"),
+        messageId: z.string().describe("The Message ID to edit (the 'id' returned by send_channel_message or list_channel_messages)"),
+        content: z.string().describe(CONTENT_DESCRIPTION),
+        subject: z.string().optional().describe("Optional replacement subject line. Omit to keep the message's current subject unchanged."),
+        mentions: z.array(z.string()).optional().describe(MENTIONS_DESCRIPTION),
+      },
+    },
+    async ({ teamId, channelId, messageId, content, subject, mentions }) => {
+      try {
+        const client = await getGraphClient();
+
+        let useSubject = subject ?? null;
+        if (useSubject === null) {
+          const existing = await client
+            .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}?$select=subject`)
+            .get();
+          useSubject = existing.subject ?? null;
+        }
+
+        const { body, mentions: resolvedMentions } = await buildHtmlBody(client, content, mentions);
+        const payload: Record<string, unknown> = { body };
+        if (useSubject !== null) payload.subject = useSubject;
+        if (resolvedMentions) payload.mentions = resolvedMentions;
+
+        await client
+          .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}`)
+          .patch(payload);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ Message updated successfully.\n${JSON.stringify({ id: messageId, subject: useSubject, mentionedCount: mentions?.length ?? 0 }, null, 2)}`,
             },
           ],
         };

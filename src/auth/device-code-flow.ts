@@ -10,6 +10,7 @@ const SCOPES = [
   "Channel.ReadBasic.All",
   "ChannelMessage.Read.All",
   "ChannelMessage.Send",
+  "ChannelMessage.ReadWrite",
   "Chat.Read",
   "offline_access",
 ];

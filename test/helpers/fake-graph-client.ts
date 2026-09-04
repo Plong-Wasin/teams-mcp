@@ -35,6 +35,9 @@ export function createFakeGraphClient(config: { response?: unknown; error?: unkn
         search = query;
         return request;
       },
+      select(_fields: string) {
+        return request;
+      },
       get: async () => record("get", undefined),
       post: async (body?: unknown) => record("post", body),
       patch: async (body?: unknown) => record("patch", body),

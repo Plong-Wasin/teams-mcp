@@ -86,10 +86,10 @@ describe("send_channel_message", () => {
       content: "hello team",
     });
 
-    expect(fake.requests[0]).toMatchObject({
+    expect(fake.requests[fake.requests.length - 1]).toMatchObject({
       path: "/teams/t1/channels/c1/messages",
       method: "post",
-      body: { body: { content: "hello team" } },
+      body: { body: { contentType: "html", content: "hello team" } },
     });
     expect(result.content[0].text).toContain("posted successfully");
   });
@@ -100,6 +100,97 @@ describe("send_channel_message", () => {
     const result = await handlers.get("send_channel_message")!({
       teamId: "t1",
       channelId: "bad",
+      content: "hi",
+    });
+
+    expect(result.content[0].text).toContain("ItemNotFound");
+  });
+});
+
+describe("edit_channel_message", () => {
+  it("patches the message body as html", async () => {
+    const fake = useGraphClient({ response: {} });
+
+    const result = await handlers.get("edit_channel_message")!({
+      teamId: "t1",
+      channelId: "c1",
+      messageId: "m1",
+      content: "line one<br>line two",
+    });
+
+    expect(fake.requests[fake.requests.length - 1]).toMatchObject({
+      path: "/teams/t1/channels/c1/messages/m1",
+      method: "patch",
+      body: { body: { contentType: "html", content: "line one<br>line two" } },
+    });
+    expect(result.content[0].text).toContain("updated successfully");
+  });
+
+  it("preserves the existing subject when none is passed", async () => {
+    const fake = useGraphClient({ response: { subject: "Original subject" } });
+
+    await handlers.get("edit_channel_message")!({
+      teamId: "t1",
+      channelId: "c1",
+      messageId: "m1",
+      content: "updated body",
+    });
+
+    expect(fake.requests[0]).toMatchObject({
+      path: "/teams/t1/channels/c1/messages/m1?$select=subject",
+      method: "get",
+    });
+    expect(fake.requests[1]).toMatchObject({
+      path: "/teams/t1/channels/c1/messages/m1",
+      method: "patch",
+      body: { subject: "Original subject" },
+    });
+  });
+
+  it("overrides the subject when one is passed, without fetching the old one", async () => {
+    const fake = useGraphClient({ response: {} });
+
+    await handlers.get("edit_channel_message")!({
+      teamId: "t1",
+      channelId: "c1",
+      messageId: "m1",
+      content: "updated body",
+      subject: "New subject",
+    });
+
+    expect(fake.requests).toHaveLength(1);
+    expect(fake.requests[0]).toMatchObject({
+      path: "/teams/t1/channels/c1/messages/m1",
+      method: "patch",
+      body: { subject: "New subject" },
+    });
+  });
+
+  it("resolves and prepends mentions", async () => {
+    const fake = useGraphClient({ response: { id: "u1", displayName: "Jane Doe" } });
+
+    await handlers.get("edit_channel_message")!({
+      teamId: "t1",
+      channelId: "c1",
+      messageId: "m1",
+      content: "please review",
+      mentions: ["jane@contoso.com"],
+    });
+
+    const patchRequest = fake.requests[fake.requests.length - 1];
+    expect(patchRequest).toMatchObject({ path: "/teams/t1/channels/c1/messages/m1", method: "patch" });
+    const body = (patchRequest.body as any).body;
+    expect(body.contentType).toBe("html");
+    expect(body.content).toBe('<at id="0">Jane Doe</at> please review');
+  });
+
+  it("surfaces a Graph error for a bad messageId", async () => {
+    useGraphClient({ error: { code: "ItemNotFound", message: "message not found" } });
+
+    const result = await handlers.get("edit_channel_message")!({
+      teamId: "t1",
+      channelId: "c1",
+      messageId: "bad",
       content: "hi",
     });
 
