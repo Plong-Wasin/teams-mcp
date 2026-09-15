@@ -358,7 +358,7 @@ describe("reply_to_channel_message", () => {
   it("posts a Reply under a Root Message", async () => {
     const fake = useGraphClient({
       responses: {
-        "/teams/t1/channels/c1/messages/root1?$select=replyToId": { response: { replyToId: null } },
+        "/teams/t1/channels/c1/messages/root1?$select=id": { response: { id: "root1" } },
         "/teams/t1/channels/c1/messages/root1/replies": { response: { id: "reply1", webUrl: "https://teams.microsoft.com/reply1" } },
       },
     });
@@ -370,7 +370,7 @@ describe("reply_to_channel_message", () => {
       content: "here's the answer",
     });
 
-    expect(fake.requests[0]).toMatchObject({ path: "/teams/t1/channels/c1/messages/root1?$select=replyToId", method: "get" });
+    expect(fake.requests[0]).toMatchObject({ path: "/teams/t1/channels/c1/messages/root1?$select=id", method: "get" });
     expect(fake.requests[1]).toMatchObject({
       path: "/teams/t1/channels/c1/messages/root1/replies",
       method: "post",
@@ -378,15 +378,16 @@ describe("reply_to_channel_message", () => {
     });
     const parsed = JSON.parse(result.content[0].text.split("\n").slice(1).join("\n"));
     expect(parsed.rootMessageId).toBe("root1");
-    expect(parsed.redirectedFromReply).toBe(false);
     expect(result.content[0].text).toContain("Reply posted successfully");
   });
 
-  it("redirects a Reply targeted at another Reply to that Reply's parent Root Message", async () => {
+  // Confirmed against a live tenant: Graph 404s a GET by a Reply's own id — there is no way to
+  // resolve a Reply's parent from the Reply's id alone, so the tool must fail loudly instead of
+  // guessing where to post (it has no delete capability to clean up a wrong guess).
+  it("fails with an actionable message rather than posting, when messageId is not a Root Message", async () => {
     const fake = useGraphClient({
       responses: {
-        "/teams/t1/channels/c1/messages/reply5?$select=replyToId": { response: { replyToId: "root1" } },
-        "/teams/t1/channels/c1/messages/root1/replies": { response: { id: "reply9", webUrl: "https://teams.microsoft.com/reply9" } },
+        "/teams/t1/channels/c1/messages/reply5?$select=id": { error: { code: "NotFound", message: "message not found" } },
       },
     });
 
@@ -397,16 +398,15 @@ describe("reply_to_channel_message", () => {
       content: "correction",
     });
 
-    expect(fake.requests[1]).toMatchObject({ path: "/teams/t1/channels/c1/messages/root1/replies", method: "post" });
-    const parsed = JSON.parse(result.content[0].text.split("\n").slice(1).join("\n"));
-    expect(parsed.rootMessageId).toBe("root1");
-    expect(parsed.redirectedFromReply).toBe(true);
+    expect(result.content[0].text).toContain("reply5");
+    expect(result.content[0].text).toContain("parentId");
+    expect(fake.requests).toHaveLength(1);
   });
 
   it("resolves and prepends mentions", async () => {
     const fake = useGraphClient({
       responses: {
-        "/teams/t1/channels/c1/messages/root1?$select=replyToId": { response: { replyToId: null } },
+        "/teams/t1/channels/c1/messages/root1?$select=id": { response: { id: "root1" } },
         "/users/jane%40contoso.com": { response: { id: "u1", displayName: "Jane Doe" } },
         "/teams/t1/channels/c1/messages/root1/replies": { response: { id: "reply1" } },
       },
@@ -425,7 +425,7 @@ describe("reply_to_channel_message", () => {
     expect(body.content).toBe('<at id="0">Jane Doe</at> please review');
   });
 
-  it("surfaces a Graph error rather than throwing", async () => {
+  it("surfaces a non-NotFound Graph error rather than throwing", async () => {
     useGraphClient({ error: { code: "Forbidden", message: "no access" } });
 
     const result = await handlers.get("reply_to_channel_message")!({
@@ -540,27 +540,21 @@ describe("get_channel_thread", () => {
     expect(parsed.nextCursor).toBeNull();
   });
 
-  it("resolves a Reply identifier to its Thread's Root Message instead of returning an empty Thread", async () => {
-    const replyRaw = { id: "reply3", replyToId: "root1", createdDateTime: "2024-01-01T03:00:00Z" };
-
+  // Confirmed against a live tenant: Graph 404s a GET by a Reply's own id, so there is no way to
+  // resolve a Reply's parent from the Reply's id alone — the tool must fail loudly and say so,
+  // rather than silently returning an empty Thread (which would read as "nobody answered").
+  it("fails with an actionable message rather than an empty Thread, when messageId is a Reply id", async () => {
     const fake = useGraphClient({
       responses: {
-        "/teams/t1/channels/c1/messages/reply3": { response: replyRaw },
-        "/teams/t1/channels/c1/messages/root1": { response: rootRaw },
-        "/teams/t1/channels/c1/messages/root1/replies?$top=50": { response: { value: [rawReply("r1", "2024-01-01T01:00:00Z")] } },
+        "/teams/t1/channels/c1/messages/reply3": { error: { code: "NotFound", message: "message not found" } },
       },
     });
 
     const result = await handlers.get("get_channel_thread")!({ teamId: "t1", channelId: "c1", messageId: "reply3" });
-    const parsed = JSON.parse(result.content[0].text);
 
-    expect(fake.requests.map((r) => r.path)).toEqual([
-      "/teams/t1/channels/c1/messages/reply3",
-      "/teams/t1/channels/c1/messages/root1",
-      "/teams/t1/channels/c1/messages/root1/replies?$top=50",
-    ]);
-    expect(parsed.root.id).toBe("root1");
-    expect(parsed.replies).toHaveLength(1);
+    expect(result.content[0].text).toContain("reply3");
+    expect(result.content[0].text).toContain("parentId");
+    expect(fake.requests).toHaveLength(1);
   });
 
   it("returns a cursor when more Replies exist, and consumes it verbatim on the next call", async () => {

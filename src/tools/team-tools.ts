@@ -21,6 +21,19 @@ const CONTENT_DESCRIPTION =
 const MENTIONS_DESCRIPTION =
   "User principal names or email addresses to @mention at the start of the message (e.g. ['jane@contoso.com']). Each is resolved to a user and rendered as a clickable @mention that notifies them.";
 
+// Confirmed against a live tenant: GET /teams/{t}/channels/{c}/messages/{id} 404s when id is a
+// Reply's own id — Graph only supports fetching a Reply nested under its known root
+// (.../messages/{rootId}/replies/{replyId}), so a Reply's parent can never be resolved from the
+// Reply's id alone. There is no way to tell that apart from "id doesn't exist at all" from the error.
+function notRootMessageError(messageId: string): string {
+  return (
+    `Could not find "${messageId}" as a Root Message in this Channel. If this is the id of a Reply ` +
+    "(for example, one returned by search_messages, or one previewed by list_channel_messages / " +
+    "get_channel_thread), pass that Reply's parentId — its Root Message id — instead. Microsoft Graph " +
+    "does not support resolving a Reply's parent from the Reply's own id."
+  );
+}
+
 interface HtmlBody {
   body: { contentType: "html"; content: string };
   mentions?: Array<{
@@ -305,13 +318,14 @@ export function registerTeamTools(server: McpServer): void {
       description:
         "Post a Reply underneath a Root Message, so it appears attached to that Thread instead of floating as a new Root " +
         "Message. Operates on a Reply, not a Root Message — there is no subject parameter, since a subject is a Root Message " +
-        "concept. If the given messageId is itself a Reply (for example, one returned by search_messages), the Reply is " +
-        "automatically redirected to that Reply's parent Root Message, because a Thread is exactly one level deep and cannot " +
-        "be nested further.",
+        "concept. messageId MUST be a Root Message id, not a Reply id — Microsoft Graph has no way to resolve a Reply's " +
+        "parent from the Reply's own id, so this cannot be done automatically. If you have a Reply (for example, one " +
+        "returned by search_messages), use that Reply's parentId as messageId instead of its own id. Passing a Reply's own " +
+        "id fails with a clear error rather than posting somewhere unexpected.",
       inputSchema: {
         teamId: z.string().describe("The Team ID (from list_teams)"),
         channelId: z.string().describe("The Channel ID (from list_channels)"),
-        messageId: z.string().describe("The Root Message or Reply to answer. If this is a Reply, the new Reply is redirected to its parent Root Message."),
+        messageId: z.string().describe("The Root Message to answer. Must be a Root Message id — if you only have a Reply, pass that Reply's parentId here instead."),
         content: z.string().describe(CONTENT_DESCRIPTION),
         mentions: z.array(z.string()).optional().describe(MENTIONS_DESCRIPTION),
       },
@@ -320,18 +334,23 @@ export function registerTeamTools(server: McpServer): void {
       try {
         const client = await getGraphClient();
 
-        const target = await client
-          .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}?$select=replyToId`)
-          .get();
-
-        const rootMessageId = target.replyToId ?? messageId;
+        try {
+          await client
+            .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}?$select=id`)
+            .get();
+        } catch (error: any) {
+          if (error?.code === "NotFound") {
+            return { content: [{ type: "text", text: notRootMessageError(messageId) }] };
+          }
+          throw error;
+        }
 
         const { body, mentions: resolvedMentions } = await buildHtmlBody(client, content, mentions);
         const payload: Record<string, unknown> = { body };
         if (resolvedMentions) payload.mentions = resolvedMentions;
 
         const reply = await client
-          .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies`)
+          .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}/replies`)
           .post(payload);
 
         return {
@@ -342,8 +361,7 @@ export function registerTeamTools(server: McpServer): void {
                 {
                   id: reply.id,
                   webUrl: reply.webUrl,
-                  rootMessageId,
-                  redirectedFromReply: target.replyToId != null,
+                  rootMessageId: messageId,
                   mentionedCount: mentions?.length ?? 0,
                 },
                 null,
@@ -406,18 +424,19 @@ export function registerTeamTools(server: McpServer): void {
     "get_channel_thread",
     {
       description:
-        "Read a whole Thread: the Root Message together with a page of its Replies, in one response. Accepts either a Root " +
-        "Message ID or a Reply ID — a Reply ID is automatically resolved to its Thread's Root Message, so opening a Thread by " +
-        "any of its Replies still returns the whole Thread rather than an empty page. A page holds at most 50 Replies " +
-        "(the Graph API's own ceiling). IMPORTANT — paging direction: the Graph API returns Replies newest-first, so the " +
-        "first page (no cursor) is the END of the conversation, not the beginning; passing the returned nextCursor into " +
-        "another call moves further back into the Thread's past. Within each page, Replies are sorted oldest-first for " +
-        "readability. This means a truncated page (nextCursor present) looks exactly like a Thread whose beginning is " +
+        "Read a whole Thread: the Root Message together with a page of its Replies, in one response. messageId MUST be a " +
+        "Root Message id, not a Reply id — Microsoft Graph has no way to resolve a Reply's parent from the Reply's own id, " +
+        "so this cannot be done automatically. If you have a Reply (for example, one returned by search_messages, or one " +
+        "previewed by list_channel_messages), use that Reply's parentId as messageId instead. A page holds at most 50 " +
+        "Replies (the Graph API's own ceiling). IMPORTANT — paging direction: the Graph API returns Replies newest-first, " +
+        "so the first page (no cursor) is the END of the conversation, not the beginning; passing the returned nextCursor " +
+        "into another call moves further back into the Thread's past. Within each page, Replies are sorted oldest-first " +
+        "for readability. This means a truncated page (nextCursor present) looks exactly like a Thread whose beginning is " +
         "missing — it is not.",
       inputSchema: {
         teamId: z.string().describe("The Team ID (from list_teams)"),
         channelId: z.string().describe("The Channel ID (from list_channels)"),
-        messageId: z.string().describe("A Root Message ID or Reply ID identifying the Thread to read"),
+        messageId: z.string().describe("The Root Message identifying the Thread to read. Must be a Root Message id — if you only have a Reply, pass that Reply's parentId here instead."),
         cursor: z
           .string()
           .optional()
@@ -428,20 +447,16 @@ export function registerTeamTools(server: McpServer): void {
       try {
         const client = await getGraphClient();
 
-        const target = await client
-          .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}`)
-          .get();
-
-        let rootMessageId: string;
         let rootRaw: any;
-        if (target.replyToId) {
-          rootMessageId = target.replyToId;
+        try {
           rootRaw = await client
-            .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}`)
+            .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}`)
             .get();
-        } else {
-          rootMessageId = messageId;
-          rootRaw = target;
+        } catch (error: any) {
+          if (error?.code === "NotFound") {
+            return { content: [{ type: "text", text: notRootMessageError(messageId) }] };
+          }
+          throw error;
         }
 
         // `cursor` is the opaque `@odata.nextLink` Graph handed back on a previous page — the Graph
@@ -450,7 +465,7 @@ export function registerTeamTools(server: McpServer): void {
         const repliesRaw = cursor
           ? await client.api(cursor).get()
           : await client
-              .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies?$top=50`)
+              .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}/replies?$top=50`)
               .get();
 
         const replies = sortByCreatedAscending((repliesRaw.value ?? []).map(projectMessage));
@@ -485,7 +500,10 @@ export function registerTeamTools(server: McpServer): void {
         "Search across the authenticated user's Teams chat and channel messages using Microsoft Search (keyword search over message body, sender, and attachments). Supports KQL-style qualifiers: from:<person>, to:<person>, sent><date>, hasAttachment:true/false, isMentioned:true/false, mentions:<userId>. Only returns messages the signed-in user has access to. " +
         "Each Channel Message result carries its Team and Channel identifiers at the top level, ready to hand to " +
         "get_channel_thread or reply_to_channel_message; a result from a Chat rather than a Channel has both set to null, " +
-        "since Chats are out of scope for every other tool.",
+        "since Chats are out of scope for every other tool. get_channel_thread and reply_to_channel_message both require a " +
+        "Root Message id: if a result's message.parentId is null the result IS a Root Message, so use message.id directly; " +
+        "if message.parentId is set, the result is a Reply, so use message.parentId (its Root Message) instead — Microsoft " +
+        "Graph cannot resolve a Reply's parent from the Reply's own id.",
       inputSchema: {
         query: z
           .string()
