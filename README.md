@@ -68,7 +68,7 @@ Call `auth_start` once, follow the instructions, then call `auth_poll` to comple
 | `list_teams` | List Teams the authenticated user has joined |
 | `list_channels` | List the Channels in a Team (`layoutType` is always `null` here — a Graph API limitation) |
 | `get_channel` | Get a single Channel, including its real `layoutType` (`post` or `chat`) |
-| `list_channel_messages` | List recent Root Messages. By default each is expanded with a preview of up to 5 of its most recent Replies (oldest-first), the true Reply count, and a `repliesTruncated` flag; pass `includeReplies: false` to skip it |
+| `list_channel_messages` | List recent Root Messages. By default each is expanded with a preview of up to 5 of its most recent Replies (oldest-first), a `replyCount` (a strong estimate, not a guarantee — see tool description), and a `repliesTruncated` flag; pass `includeReplies: false` to skip it |
 | `send_channel_message` | Post a new Root Message, opening a new Thread, optionally with a `subject` (post-layout channels only) and `mentions` (@mention users by UPN/email) |
 | `edit_channel_message` | Edit the body of an existing Root Message |
 | `reply_to_channel_message` | Post a Reply into an existing Thread. A Reply ID passed as the target is automatically redirected to its parent Root Message |

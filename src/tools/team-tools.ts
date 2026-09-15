@@ -3,12 +3,7 @@ import type { Client } from "@microsoft/microsoft-graph-client";
 import { z } from "zod";
 import { getGraphClient } from "../graph/client.js";
 import { handleGraphError } from "../utils/error-handler.js";
-import {
-  projectMessage,
-  sortByCreatedAscending,
-  extractSkipToken,
-  REPLY_PREVIEW_SIZE,
-} from "../graph/messages.js";
+import { projectMessage, sortByCreatedAscending, REPLY_PREVIEW_SIZE } from "../graph/messages.js";
 
 function escapeHtml(text: string): string {
   return text
@@ -151,7 +146,10 @@ export function registerTeamTools(server: McpServer): void {
       description:
         "List recent Root Messages in a Channel, most recent first — Replies are never returned as their own top-level entries here. " +
         "By default (includeReplies=true) each Root Message is expanded with a preview of at most 5 of its most recent Replies " +
-        "(oldest-first), its true Reply count, and a repliesTruncated flag telling you whether the preview left Replies out. " +
+        "(oldest-first), a replyCount, and a repliesTruncated flag telling you whether the preview left Replies out. " +
+        "replyCount reflects what the Graph API's own $expand=replies returned, which Graph documents inconsistently and may " +
+        "itself cap for a very high-traffic Root Message — treat it as a strong estimate, not a guarantee; get_channel_thread " +
+        "has no such cap and is the source of truth for a specific Thread's full Reply count. " +
         "Five is fixed and not configurable — use get_channel_thread to read a Thread's Replies in full. " +
         "Set includeReplies=false to skip the expansion and save latency when you only need Root Messages.",
       inputSchema: {
@@ -420,7 +418,10 @@ export function registerTeamTools(server: McpServer): void {
         teamId: z.string().describe("The Team ID (from list_teams)"),
         channelId: z.string().describe("The Channel ID (from list_channels)"),
         messageId: z.string().describe("A Root Message ID or Reply ID identifying the Thread to read"),
-        cursor: z.string().optional().describe("Cursor from a previous get_channel_thread call's nextCursor, to page further into the Thread's past"),
+        cursor: z
+          .string()
+          .optional()
+          .describe("Opaque nextCursor from a previous get_channel_thread call, passed back unchanged, to page further into the Thread's past"),
       },
     },
     async ({ teamId, channelId, messageId, cursor }) => {
@@ -443,13 +444,16 @@ export function registerTeamTools(server: McpServer): void {
           rootRaw = target;
         }
 
-        const skiptoken = cursor ? `&$skiptoken=${encodeURIComponent(cursor)}` : "";
-        const repliesRaw = await client
-          .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies?$top=50${skiptoken}`)
-          .get();
+        // `cursor` is the opaque `@odata.nextLink` Graph handed back on a previous page — the Graph
+        // client accepts a full URL directly, so it's passed straight through rather than parsed and
+        // rebuilt, which would tie this to an unconfirmed assumption about the nextLink's query shape.
+        const repliesRaw = cursor
+          ? await client.api(cursor).get()
+          : await client
+              .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies?$top=50`)
+              .get();
 
         const replies = sortByCreatedAscending((repliesRaw.value ?? []).map(projectMessage));
-        const nextCursor = extractSkipToken(repliesRaw["@odata.nextLink"]);
 
         return {
           content: [
@@ -459,7 +463,7 @@ export function registerTeamTools(server: McpServer): void {
                 {
                   root: projectMessage(rootRaw),
                   replies,
-                  nextCursor: nextCursor ?? null,
+                  nextCursor: repliesRaw["@odata.nextLink"] ?? null,
                 },
                 null,
                 2,

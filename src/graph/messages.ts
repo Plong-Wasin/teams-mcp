@@ -31,14 +31,3 @@ export function sortByCreatedAscending<T extends { createdDateTime: string }>(me
 }
 
 export const REPLY_PREVIEW_SIZE = 5;
-
-/** Pulls the `$skiptoken` cursor out of a Graph `@odata.nextLink`, if present. */
-export function extractSkipToken(nextLink: string | undefined | null): string | undefined {
-  if (!nextLink) return undefined;
-  try {
-    const url = new URL(nextLink);
-    return url.searchParams.get("$skiptoken") ?? url.searchParams.get("skiptoken") ?? undefined;
-  } catch {
-    return undefined;
-  }
-}

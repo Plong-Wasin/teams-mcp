@@ -563,14 +563,16 @@ describe("get_channel_thread", () => {
     expect(parsed.replies).toHaveLength(1);
   });
 
-  it("returns a cursor when more Replies exist, and consumes it on the next call", async () => {
+  it("returns a cursor when more Replies exist, and consumes it verbatim on the next call", async () => {
+    const nextLink = "https://graph.microsoft.com/v1.0/teams/t1/channels/c1/messages/root1/replies?$top=50&$skiptoken=abc123";
+
     useGraphClient({
       responses: {
         "/teams/t1/channels/c1/messages/root1": { response: rootRaw },
         "/teams/t1/channels/c1/messages/root1/replies?$top=50": {
           response: {
             value: [rawReply("r5", "2024-01-01T05:00:00Z")],
-            "@odata.nextLink": "https://graph.microsoft.com/v1.0/teams/t1/channels/c1/messages/root1/replies?$top=50&$skiptoken=abc123",
+            "@odata.nextLink": nextLink,
           },
         },
       },
@@ -578,19 +580,19 @@ describe("get_channel_thread", () => {
 
     const first = await handlers.get("get_channel_thread")!({ teamId: "t1", channelId: "c1", messageId: "root1" });
     const firstParsed = JSON.parse(first.content[0].text);
-    expect(firstParsed.nextCursor).toBe("abc123");
+    expect(firstParsed.nextCursor).toBe(nextLink);
 
     const fake2 = useGraphClient({
       responses: {
         "/teams/t1/channels/c1/messages/root1": { response: rootRaw },
-        "/teams/t1/channels/c1/messages/root1/replies?$top=50&$skiptoken=abc123": { response: { value: [rawReply("r1", "2024-01-01T01:00:00Z")] } },
+        [nextLink]: { response: { value: [rawReply("r1", "2024-01-01T01:00:00Z")] } },
       },
     });
 
-    const second = await handlers.get("get_channel_thread")!({ teamId: "t1", channelId: "c1", messageId: "root1", cursor: "abc123" });
+    const second = await handlers.get("get_channel_thread")!({ teamId: "t1", channelId: "c1", messageId: "root1", cursor: nextLink });
     const secondParsed = JSON.parse(second.content[0].text);
 
-    expect(fake2.requests.some((r) => r.path === "/teams/t1/channels/c1/messages/root1/replies?$top=50&$skiptoken=abc123")).toBe(true);
+    expect(fake2.requests.some((r) => r.path === nextLink)).toBe(true);
     expect(secondParsed.replies.map((r: any) => r.id)).toEqual(["r1"]);
   });
 
