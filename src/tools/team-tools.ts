@@ -3,6 +3,12 @@ import type { Client } from "@microsoft/microsoft-graph-client";
 import { z } from "zod";
 import { getGraphClient } from "../graph/client.js";
 import { handleGraphError } from "../utils/error-handler.js";
+import {
+  projectMessage,
+  sortByCreatedAscending,
+  extractSkipToken,
+  REPLY_PREVIEW_SIZE,
+} from "../graph/messages.js";
 
 function escapeHtml(text: string): string {
   return text
@@ -143,23 +149,48 @@ export function registerTeamTools(server: McpServer): void {
     "list_channel_messages",
     {
       description:
-        "List recent top-level Channel Messages in a Channel, most recent first. Does not include threaded replies.",
+        "List recent Root Messages in a Channel, most recent first — Replies are never returned as their own top-level entries here. " +
+        "By default (includeReplies=true) each Root Message is expanded with a preview of at most 5 of its most recent Replies " +
+        "(oldest-first), its true Reply count, and a repliesTruncated flag telling you whether the preview left Replies out. " +
+        "Five is fixed and not configurable — use get_channel_thread to read a Thread's Replies in full. " +
+        "Set includeReplies=false to skip the expansion and save latency when you only need Root Messages.",
       inputSchema: {
         teamId: z.string().describe("The Team ID (from list_teams)"),
         channelId: z.string().describe("The Channel ID (from list_channels)"),
-        top: z.number().optional().describe("Maximum number of messages to return (default: 25)"),
+        top: z.number().optional().describe("Maximum number of Root Messages to return (default: 25)"),
+        includeReplies: z
+          .boolean()
+          .optional()
+          .describe("Expand each Root Message with a Reply preview and count (default: true)"),
       },
     },
-    async ({ teamId, channelId, top }) => {
+    async ({ teamId, channelId, top, includeReplies }) => {
       try {
         const client = await getGraphClient();
+        const expand = includeReplies === false ? "" : "&$expand=replies";
 
-        const messages = await client
-          .api(`/teams/${teamId}/channels/${channelId}/messages?$top=${top ?? 25}`)
+        const raw = await client
+          .api(`/teams/${teamId}/channels/${channelId}/messages?$top=${top ?? 25}${expand}`)
           .get();
 
+        const messages = (raw.value ?? []).map((rawMessage: any) => {
+          const lean = projectMessage(rawMessage);
+          if (includeReplies === false) return lean;
+
+          const replies = (rawMessage.replies ?? []).map(projectMessage);
+          const replyCount = replies.length;
+          const preview = sortByCreatedAscending(replies).slice(-REPLY_PREVIEW_SIZE);
+
+          return {
+            ...lean,
+            replyCount,
+            replies: preview,
+            repliesTruncated: replyCount > preview.length,
+          };
+        });
+
         return {
-          content: [{ type: "text", text: JSON.stringify(messages, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ messages }, null, 2) }],
         };
       } catch (error) {
         return { content: [{ type: "text", text: handleGraphError(error) }] };
@@ -172,7 +203,10 @@ export function registerTeamTools(server: McpServer): void {
     "send_channel_message",
     {
       description:
-        "Post a new top-level Channel Message. This is not a threaded reply to an existing message. The subject line is only applied if the channel's layoutType is 'post'; it is dropped for 'chat'-layout channels, where a subject is not meaningful (check layoutType via list_channels or get_channel).",
+        "Post a new Root Message, opening a new Thread in the Channel. This is not a Reply — it does not attach to any existing " +
+        "conversation. To answer inside an existing Thread instead, use reply_to_channel_message. The subject line is only " +
+        "applied if the channel's layoutType is 'post'; it is dropped for 'chat'-layout channels, where a subject is not " +
+        "meaningful (check layoutType via list_channels or get_channel).",
       inputSchema: {
         teamId: z.string().describe("The Team ID (from list_teams)"),
         channelId: z.string().describe("The Channel ID (from list_channels)"),
@@ -203,7 +237,7 @@ export function registerTeamTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `✅ Message posted successfully.\n${JSON.stringify({ id: message.id, webUrl: message.webUrl, channelLayoutType: channel.layoutType, subjectApplied: !!useSubject, mentionedCount: mentions?.length ?? 0 }, null, 2)}`,
+              text: `✅ Root Message posted successfully.\n${JSON.stringify({ id: message.id, webUrl: message.webUrl, channelLayoutType: channel.layoutType, subjectApplied: !!useSubject, mentionedCount: mentions?.length ?? 0 }, null, 2)}`,
             },
           ],
         };
@@ -218,11 +252,14 @@ export function registerTeamTools(server: McpServer): void {
     "edit_channel_message",
     {
       description:
-        "Edit the body of an existing top-level Channel Message that the authenticated user sent. Replaces the entire message content — there is no partial/append edit. Teams shows an 'Edited' label on the message. The existing subject line is preserved automatically unless you pass a new one (Microsoft Graph clears the subject on any PATCH that omits it, so this tool fetches and re-sends it for you).",
+        "Edit the body of an existing Root Message that the authenticated user sent. To edit a Reply instead, use " +
+        "edit_channel_reply. Replaces the entire message content — there is no partial/append edit. Teams shows an " +
+        "'Edited' label on the message. The existing subject line is preserved automatically unless you pass a new one " +
+        "(Microsoft Graph clears the subject on any PATCH that omits it, so this tool fetches and re-sends it for you).",
       inputSchema: {
         teamId: z.string().describe("The Team ID (from list_teams)"),
         channelId: z.string().describe("The Channel ID (from list_channels)"),
-        messageId: z.string().describe("The Message ID to edit (the 'id' returned by send_channel_message or list_channel_messages)"),
+        messageId: z.string().describe("The Root Message ID to edit (the 'id' returned by send_channel_message or list_channel_messages)"),
         content: z.string().describe(CONTENT_DESCRIPTION),
         subject: z.string().optional().describe("Optional replacement subject line. Omit to keep the message's current subject unchanged."),
         mentions: z.array(z.string()).optional().describe(MENTIONS_DESCRIPTION),
@@ -253,7 +290,180 @@ export function registerTeamTools(server: McpServer): void {
           content: [
             {
               type: "text",
-              text: `✅ Message updated successfully.\n${JSON.stringify({ id: messageId, subject: useSubject, mentionedCount: mentions?.length ?? 0 }, null, 2)}`,
+              text: `✅ Root Message updated successfully.\n${JSON.stringify({ id: messageId, subject: useSubject, mentionedCount: mentions?.length ?? 0 }, null, 2)}`,
+            },
+          ],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: handleGraphError(error) }] };
+      }
+    },
+  );
+
+  // ── reply_to_channel_message ─────────────────────────────────────────────
+  server.registerTool(
+    "reply_to_channel_message",
+    {
+      description:
+        "Post a Reply underneath a Root Message, so it appears attached to that Thread instead of floating as a new Root " +
+        "Message. Operates on a Reply, not a Root Message — there is no subject parameter, since a subject is a Root Message " +
+        "concept. If the given messageId is itself a Reply (for example, one returned by search_messages), the Reply is " +
+        "automatically redirected to that Reply's parent Root Message, because a Thread is exactly one level deep and cannot " +
+        "be nested further.",
+      inputSchema: {
+        teamId: z.string().describe("The Team ID (from list_teams)"),
+        channelId: z.string().describe("The Channel ID (from list_channels)"),
+        messageId: z.string().describe("The Root Message or Reply to answer. If this is a Reply, the new Reply is redirected to its parent Root Message."),
+        content: z.string().describe(CONTENT_DESCRIPTION),
+        mentions: z.array(z.string()).optional().describe(MENTIONS_DESCRIPTION),
+      },
+    },
+    async ({ teamId, channelId, messageId, content, mentions }) => {
+      try {
+        const client = await getGraphClient();
+
+        const target = await client
+          .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}?$select=replyToId`)
+          .get();
+
+        const rootMessageId = target.replyToId ?? messageId;
+
+        const { body, mentions: resolvedMentions } = await buildHtmlBody(client, content, mentions);
+        const payload: Record<string, unknown> = { body };
+        if (resolvedMentions) payload.mentions = resolvedMentions;
+
+        const reply = await client
+          .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies`)
+          .post(payload);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ Reply posted successfully.\n${JSON.stringify(
+                {
+                  id: reply.id,
+                  webUrl: reply.webUrl,
+                  rootMessageId,
+                  redirectedFromReply: target.replyToId != null,
+                  mentionedCount: mentions?.length ?? 0,
+                },
+                null,
+                2,
+              )}`,
+            },
+          ],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: handleGraphError(error) }] };
+      }
+    },
+  );
+
+  // ── edit_channel_reply ───────────────────────────────────────────────────
+  server.registerTool(
+    "edit_channel_reply",
+    {
+      description:
+        "Edit the body of an existing Reply that the authenticated user sent. To edit a Root Message instead, use " +
+        "edit_channel_message. Replaces the entire Reply content — there is no partial/append edit. There is no subject " +
+        "parameter, since a subject is a Root Message concept.",
+      inputSchema: {
+        teamId: z.string().describe("The Team ID (from list_teams)"),
+        channelId: z.string().describe("The Channel ID (from list_channels)"),
+        rootMessageId: z.string().describe("The Root Message ID of the Thread the Reply belongs to"),
+        replyId: z.string().describe("The Reply ID to edit"),
+        content: z.string().describe(CONTENT_DESCRIPTION),
+        mentions: z.array(z.string()).optional().describe(MENTIONS_DESCRIPTION),
+      },
+    },
+    async ({ teamId, channelId, rootMessageId, replyId, content, mentions }) => {
+      try {
+        const client = await getGraphClient();
+
+        const { body, mentions: resolvedMentions } = await buildHtmlBody(client, content, mentions);
+        const payload: Record<string, unknown> = { body };
+        if (resolvedMentions) payload.mentions = resolvedMentions;
+
+        await client
+          .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies/${replyId}`)
+          .patch(payload);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `✅ Reply updated successfully.\n${JSON.stringify({ id: replyId, rootMessageId, mentionedCount: mentions?.length ?? 0 }, null, 2)}`,
+            },
+          ],
+        };
+      } catch (error) {
+        return { content: [{ type: "text", text: handleGraphError(error) }] };
+      }
+    },
+  );
+
+  // ── get_channel_thread ───────────────────────────────────────────────────
+  server.registerTool(
+    "get_channel_thread",
+    {
+      description:
+        "Read a whole Thread: the Root Message together with a page of its Replies, in one response. Accepts either a Root " +
+        "Message ID or a Reply ID — a Reply ID is automatically resolved to its Thread's Root Message, so opening a Thread by " +
+        "any of its Replies still returns the whole Thread rather than an empty page. A page holds at most 50 Replies " +
+        "(the Graph API's own ceiling). IMPORTANT — paging direction: the Graph API returns Replies newest-first, so the " +
+        "first page (no cursor) is the END of the conversation, not the beginning; passing the returned nextCursor into " +
+        "another call moves further back into the Thread's past. Within each page, Replies are sorted oldest-first for " +
+        "readability. This means a truncated page (nextCursor present) looks exactly like a Thread whose beginning is " +
+        "missing — it is not.",
+      inputSchema: {
+        teamId: z.string().describe("The Team ID (from list_teams)"),
+        channelId: z.string().describe("The Channel ID (from list_channels)"),
+        messageId: z.string().describe("A Root Message ID or Reply ID identifying the Thread to read"),
+        cursor: z.string().optional().describe("Cursor from a previous get_channel_thread call's nextCursor, to page further into the Thread's past"),
+      },
+    },
+    async ({ teamId, channelId, messageId, cursor }) => {
+      try {
+        const client = await getGraphClient();
+
+        const target = await client
+          .api(`/teams/${teamId}/channels/${channelId}/messages/${messageId}`)
+          .get();
+
+        let rootMessageId: string;
+        let rootRaw: any;
+        if (target.replyToId) {
+          rootMessageId = target.replyToId;
+          rootRaw = await client
+            .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}`)
+            .get();
+        } else {
+          rootMessageId = messageId;
+          rootRaw = target;
+        }
+
+        const skiptoken = cursor ? `&$skiptoken=${encodeURIComponent(cursor)}` : "";
+        const repliesRaw = await client
+          .api(`/teams/${teamId}/channels/${channelId}/messages/${rootMessageId}/replies?$top=50${skiptoken}`)
+          .get();
+
+        const replies = sortByCreatedAscending((repliesRaw.value ?? []).map(projectMessage));
+        const nextCursor = extractSkipToken(repliesRaw["@odata.nextLink"]);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  root: projectMessage(rootRaw),
+                  replies,
+                  nextCursor: nextCursor ?? null,
+                },
+                null,
+                2,
+              ),
             },
           ],
         };
@@ -268,7 +478,10 @@ export function registerTeamTools(server: McpServer): void {
     "search_messages",
     {
       description:
-        "Search across the authenticated user's Teams chat and channel messages using Microsoft Search (keyword search over message body, sender, and attachments). Supports KQL-style qualifiers: from:<person>, to:<person>, sent><date>, hasAttachment:true/false, isMentioned:true/false, mentions:<userId>. Only returns messages the signed-in user has access to.",
+        "Search across the authenticated user's Teams chat and channel messages using Microsoft Search (keyword search over message body, sender, and attachments). Supports KQL-style qualifiers: from:<person>, to:<person>, sent><date>, hasAttachment:true/false, isMentioned:true/false, mentions:<userId>. Only returns messages the signed-in user has access to. " +
+        "Each Channel Message result carries its Team and Channel identifiers at the top level, ready to hand to " +
+        "get_channel_thread or reply_to_channel_message; a result from a Chat rather than a Channel has both set to null, " +
+        "since Chats are out of scope for every other tool.",
       inputSchema: {
         query: z
           .string()
@@ -292,8 +505,20 @@ export function registerTeamTools(server: McpServer): void {
           ],
         });
 
+        const hits = result?.value?.[0]?.hitsContainers?.[0]?.hits ?? [];
+        const results = hits.map((hit: any) => {
+          const resource = hit.resource ?? {};
+          const channelIdentity = resource.channelIdentity;
+          return {
+            teamId: channelIdentity?.teamId ?? null,
+            channelId: channelIdentity?.channelId ?? null,
+            message: projectMessage(resource),
+            summary: hit.summary ?? null,
+          };
+        });
+
         return {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+          content: [{ type: "text", text: JSON.stringify({ results }, null, 2) }],
         };
       } catch (error) {
         return { content: [{ type: "text", text: handleGraphError(error) }] };
