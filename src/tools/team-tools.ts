@@ -503,7 +503,10 @@ export function registerTeamTools(server: McpServer): void {
         "since Chats are out of scope for every other tool. get_channel_thread and reply_to_channel_message both require a " +
         "Root Message id: if a result's message.parentId is null the result IS a Root Message, so use message.id directly; " +
         "if message.parentId is set, the result is a Reply, so use message.parentId (its Root Message) instead — Microsoft " +
-        "Graph cannot resolve a Reply's parent from the Reply's own id.",
+        "Graph cannot resolve a Reply's parent from the Reply's own id. " +
+        "Microsoft Search does not return Attachments: a hit whose body is empty and whose attachments array is empty may " +
+        "be a Card (its summary usually starts with \"Card\"). To read the Card, fetch the message with " +
+        "get_channel_thread or list_channel_messages using the hit's Team and Channel identifiers.",
       inputSchema: {
         query: z
           .string()
