@@ -497,16 +497,16 @@ export function registerTeamTools(server: McpServer): void {
     "search_messages",
     {
       description:
-        "Search across the authenticated user's Teams chat and channel messages using Microsoft Search (keyword search over message body, sender, and attachments). Supports KQL-style qualifiers: from:<person>, to:<person>, sent><date>, hasAttachment:true/false, isMentioned:true/false, mentions:<userId>. Only returns messages the signed-in user has access to. " +
+        "Search across the authenticated user's Teams chat and channel messages using Microsoft Search (keyword search over message body, sender, and attachment metadata). Supports KQL-style qualifiers: from:<person>, to:<person>, sent><date>, hasAttachment:true/false, isMentioned:true/false, mentions:<userId>. Only returns messages the signed-in user has access to. " +
         "Each Channel Message result carries its Team and Channel identifiers at the top level, ready to hand to " +
         "get_channel_thread or reply_to_channel_message; a result from a Chat rather than a Channel has both set to null, " +
         "since Chats are out of scope for every other tool. get_channel_thread and reply_to_channel_message both require a " +
         "Root Message id: if a result's message.parentId is null the result IS a Root Message, so use message.id directly; " +
         "if message.parentId is set, the result is a Reply, so use message.parentId (its Root Message) instead — Microsoft " +
         "Graph cannot resolve a Reply's parent from the Reply's own id. " +
-        "Microsoft Search does not return Attachments: a hit whose body is empty and whose attachments array is empty may " +
-        "be a Card (its summary usually starts with \"Card\"). To read the Card, fetch the message with " +
-        "get_channel_thread or list_channel_messages using the hit's Team and Channel identifiers.",
+        "Microsoft Search does not report Attachments, so every hit has message.attachments = null (unknown, not empty). " +
+        "A hit with an empty body may be a Card. For a Channel Message hit, read the Card with get_channel_thread or " +
+        "list_channel_messages using the hit's Team and Channel identifiers; a Card in a Chat hit cannot be read.",
       inputSchema: {
         query: z
           .string()
@@ -537,7 +537,7 @@ export function registerTeamTools(server: McpServer): void {
           return {
             teamId: channelIdentity?.teamId ?? null,
             channelId: channelIdentity?.channelId ?? null,
-            message: projectMessage(resource),
+            message: { ...projectMessage(resource), attachments: null },
             summary: hit.summary ?? null,
           };
         });

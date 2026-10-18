@@ -22,7 +22,8 @@ export interface LeanMessage {
   createdDateTime: string;
   subject: string | null;
   body: string;
-  attachments: LeanAttachment[];
+  /** null when the source (Microsoft Search) does not report Attachments, so "none" and "unknown" stay distinct. */
+  attachments: LeanAttachment[] | null;
   webUrl: string;
 }
 
