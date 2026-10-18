@@ -28,5 +28,13 @@ _Avoid_: comment, response, threaded message
 A Root Message together with all of its Replies — the unit a reader needs in order to answer in context.
 _Avoid_: conversation, discussion, post
 
+**Attachment**:
+Anything attached to a Channel Message, such as a Card or a reference to a file. A Channel Message may carry zero or more Attachments.
+_Avoid_: embed, file (when meaning an Attachment in general)
+
+**Card**:
+An Attachment holding structured content (for example an Adaptive Card), typically posted by a bot or webhook. A Channel Message that carries a Card often has an almost empty body, so the Card is the message's real content.
+_Avoid_: embed, rich message
+
 **Chat** _(out of scope)_:
 A 1:1 or group conversation outside any Team/Channel. No tool targets a Chat directly. The one accepted exception is `search_messages`, which queries Microsoft Search across both Channel Messages and Chat messages because the Search API does not separate them — reading a Chat message that way is tolerated, writing to a Chat is not.

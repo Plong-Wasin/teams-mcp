@@ -692,3 +692,41 @@ describe("Reply tools have no subject parameter", () => {
     expect(configs.get("edit_channel_reply")?.inputSchema).not.toHaveProperty("subject");
   });
 });
+
+describe("attachments in message projection", () => {
+  it("returns a parsed Adaptive Card and a file reference from list_channel_messages", async () => {
+    const card = { type: "AdaptiveCard", body: [{ type: "TextBlock", text: "Build failed" }] };
+    useGraphClient({
+      response: {
+        value: [
+          {
+            id: "m1",
+            createdDateTime: "2026-01-01T00:00:00Z",
+            body: { contentType: "html", content: '<attachment id="a1"></attachment>' },
+            attachments: [
+              { id: "a1", contentType: "application/vnd.microsoft.card.adaptive", content: JSON.stringify(card) },
+              { id: "a2", contentType: "reference", name: "report.pdf", contentUrl: "https://example/report.pdf" },
+              { id: "a3", contentType: "application/vnd.microsoft.card.hero", content: "not json" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const result = await handlers.get("list_channel_messages")!({ teamId: "t1", channelId: "c1", includeReplies: false });
+
+    const [a1, a2, a3] = JSON.parse(result.content[0].text).messages[0].attachments;
+    expect(a1.content).toEqual(card);
+    expect(a2).toMatchObject({ name: "report.pdf", contentUrl: "https://example/report.pdf" });
+    expect(a2).not.toHaveProperty("content");
+    expect(a3.content).toBe("not json");
+  });
+
+  it("returns an empty attachments array when the message has none", async () => {
+    useGraphClient({ response: { value: [{ id: "m1", createdDateTime: "2026-01-01T00:00:00Z", body: { content: "hi" } }] } });
+
+    const result = await handlers.get("list_channel_messages")!({ teamId: "t1", channelId: "c1", includeReplies: false });
+
+    expect(JSON.parse(result.content[0].text).messages[0].attachments).toEqual([]);
+  });
+});
