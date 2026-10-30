@@ -692,3 +692,136 @@ describe("Reply tools have no subject parameter", () => {
     expect(configs.get("edit_channel_reply")?.inputSchema).not.toHaveProperty("subject");
   });
 });
+
+describe("attachments in message projection", () => {
+  it("returns a parsed Adaptive Card and a file reference from list_channel_messages", async () => {
+    const card = { type: "AdaptiveCard", body: [{ type: "TextBlock", text: "Build failed" }] };
+    useGraphClient({
+      response: {
+        value: [
+          {
+            id: "m1",
+            createdDateTime: "2026-01-01T00:00:00Z",
+            body: { contentType: "html", content: '<attachment id="a1"></attachment>' },
+            attachments: [
+              { id: "a1", contentType: "application/vnd.microsoft.card.adaptive", content: JSON.stringify(card) },
+              { id: "a2", contentType: "reference", name: "report.pdf", contentUrl: "https://example/report.pdf" },
+              { id: "a3", contentType: "application/vnd.microsoft.card.hero", content: "not json" },
+            ],
+          },
+        ],
+      },
+    });
+
+    const result = await handlers.get("list_channel_messages")!({ teamId: "t1", channelId: "c1", includeReplies: false });
+
+    const [a1, a2, a3] = JSON.parse(result.content[0].text).messages[0].attachments;
+    expect(a1.content).toEqual(card);
+    expect(a2).toMatchObject({ name: "report.pdf", contentUrl: "https://example/report.pdf" });
+    expect(a2).not.toHaveProperty("content");
+    expect(a3.content).toBe("not json");
+  });
+
+  it("returns an empty attachments array when the message has none", async () => {
+    useGraphClient({ response: { value: [{ id: "m1", createdDateTime: "2026-01-01T00:00:00Z", body: { content: "hi" } }] } });
+
+    const result = await handlers.get("list_channel_messages")!({ teamId: "t1", channelId: "c1", includeReplies: false });
+
+    expect(JSON.parse(result.content[0].text).messages[0].attachments).toEqual([]);
+  });
+});
+
+describe("attachments in other read paths", () => {
+  const card = { type: "AdaptiveCard", body: [{ type: "TextBlock", text: "Deploy done" }] };
+  const cardAttachment = {
+    id: "a1",
+    contentType: "application/vnd.microsoft.card.adaptive",
+    content: JSON.stringify(card),
+  };
+
+  it("get_channel_thread returns a Card carried by a Reply", async () => {
+    useGraphClient({
+      responses: {
+        "/teams/t1/channels/c1/messages/root1": {
+          response: { id: "root1", replyToId: null, createdDateTime: "2024-01-01T00:00:00Z", body: { content: "q" } },
+        },
+        "/teams/t1/channels/c1/messages/root1/replies?$top=50": {
+          response: {
+            value: [
+              {
+                id: "r1",
+                replyToId: "root1",
+                createdDateTime: "2024-01-01T01:00:00Z",
+                body: { content: '<attachment id="a1"></attachment>' },
+                attachments: [cardAttachment],
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    const result = await handlers.get("get_channel_thread")!({ teamId: "t1", channelId: "c1", messageId: "root1" });
+    const parsed = JSON.parse(result.content[0].text);
+
+    expect(parsed.root.attachments).toEqual([]);
+    expect(parsed.replies[0].attachments[0].content).toEqual(card);
+  });
+
+  it("list_channel_messages returns a Card carried by a Reply preview", async () => {
+    useGraphClient({
+      response: {
+        value: [
+          {
+            id: "root1",
+            createdDateTime: "2024-01-01T00:00:00Z",
+            body: { content: "q" },
+            replies: [
+              {
+                id: "r1",
+                replyToId: "root1",
+                createdDateTime: "2024-01-01T01:00:00Z",
+                body: { content: "" },
+                attachments: [cardAttachment],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const result = await handlers.get("list_channel_messages")!({ teamId: "t1", channelId: "c1" });
+
+    expect(JSON.parse(result.content[0].text).messages[0].replies[0].attachments[0].content).toEqual(card);
+  });
+
+  it("search_messages reports attachments as null (unknown), never as an empty array", async () => {
+    useGraphClient({
+      response: {
+        value: [
+          {
+            hitsContainers: [
+              {
+                hits: [
+                  {
+                    summary: "Card - access it on ...",
+                    resource: {
+                      id: "m1",
+                      createdDateTime: "2024-01-01T00:00:00Z",
+                      body: { content: "" },
+                      channelIdentity: { teamId: "t1", channelId: "c1" },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    });
+
+    const result = await handlers.get("search_messages")!({ query: "x" });
+
+    expect(JSON.parse(result.content[0].text).results[0].message.attachments).toBeNull();
+  });
+});
